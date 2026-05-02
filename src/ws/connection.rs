@@ -26,6 +26,24 @@ use crate::{Result, error::Error};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// Disable Nagle's algorithm on the underlying TCP socket so outgoing PING /
+/// subscription frames aren't delayed up to 200 ms by the kernel. Best-effort:
+/// silently noops if we can't reach the inner socket.
+fn set_tcp_nodelay(ws_stream: &WsStream) {
+    let inner = ws_stream.get_ref();
+    let tcp: Option<&TcpStream> = match inner {
+        MaybeTlsStream::Plain(s) => Some(s),
+        MaybeTlsStream::Rustls(tls) => Some(tls.get_ref().0),
+        _ => None,
+    };
+    if let Some(tcp) = tcp {
+        if let Err(_e) = tcp.set_nodelay(true) {
+            #[cfg(feature = "tracing")]
+            tracing::warn!("failed to set TCP_NODELAY on WS stream: {_e}");
+        }
+    }
+}
+
 /// Broadcast channel capacity for incoming messages.
 const BROADCAST_CAPACITY: usize = 1024;
 
@@ -174,6 +192,7 @@ where
             // Attempt connection
             match connect_async(&endpoint).await {
                 Ok((ws_stream, _)) => {
+                    set_tcp_nodelay(&ws_stream);
                     attempt = 0;
                     backoff.reset();
                     _ = state_tx.send(ConnectionState::Connected {
